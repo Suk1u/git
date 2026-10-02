@@ -1,0 +1,188 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Anime4K Offline WebGL</title>
+</head>
+<body style="margin:0;background:#000">
+<canvas id="output" hidden></canvas>
+<script>
+/*
+ * Offline WebGL2 port inspired by Anime4K v3.2 Upscale Original/DoG.
+ * Anime4K copyright (c) 2019-2021 bloc97, MIT License.
+ * This engine is bundled with the script and performs no network requests.
+ */
+(() => {
+  const canvas = document.getElementById("output")
+  const gl = canvas.getContext("webgl2", {
+    alpha: false,
+    antialias: false,
+    depth: false,
+    preserveDrawingBuffer: true,
+    premultipliedAlpha: false,
+  })
+
+  if (!gl) {
+    window.Anime4KOffline = { ready: false, run: async () => { throw new Error("设备不支持 WebGL2") } }
+    return
+  }
+
+  const vertexSource = `#version 300 es
+    precision highp float;
+    const vec2 positions[3] = vec2[3](vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));
+    out vec2 uv;
+    void main() {
+      vec2 p = positions[gl_VertexID];
+      uv = p * 0.5 + 0.5;
+      gl_Position = vec4(p, 0.0, 1.0);
+    }
+  `
+
+  const fragmentSource = `#version 300 es
+    precision highp float;
+    uniform sampler2D sourceImage;
+    uniform vec2 sourceSize;
+    uniform float strength;
+    uniform float profile;
+    uniform float denoise;
+    in vec2 uv;
+    out vec4 outColor;
+
+    float luma(vec3 color) { return dot(color, vec3(0.299, 0.587, 0.114)); }
+    vec3 sampleSource(vec2 p) { return texture(sourceImage, clamp(p, vec2(0.0), vec2(1.0))).rgb; }
+
+    void main() {
+      vec2 px = 1.0 / sourceSize;
+      vec2 sourceUV = uv;
+      vec3 center = sampleSource(sourceUV);
+      vec3 left = sampleSource(sourceUV - vec2(px.x, 0.0));
+      vec3 right = sampleSource(sourceUV + vec2(px.x, 0.0));
+      vec3 top = sampleSource(sourceUV - vec2(0.0, px.y));
+      vec3 bottom = sampleSource(sourceUV + vec2(0.0, px.y));
+      vec3 tl = sampleSource(sourceUV - px);
+      vec3 tr = sampleSource(sourceUV + vec2(px.x, -px.y));
+      vec3 bl = sampleSource(sourceUV + vec2(-px.x, px.y));
+      vec3 br = sampleSource(sourceUV + px);
+
+      float lc = luma(center);
+      float gx = -luma(tl) - 2.0*luma(left) - luma(bl) + luma(tr) + 2.0*luma(right) + luma(br);
+      float gy = -luma(tl) - 2.0*luma(top) - luma(tr) + luma(bl) + 2.0*luma(bottom) + luma(br);
+      float edge = clamp(length(vec2(gx, gy)), 0.0, 1.0);
+      vec2 direction = normalize(vec2(gx, gy) + vec2(0.00001));
+      vec2 towardDark = -sign(vec2(gx, gy)) * px;
+      vec3 directional = mix(
+        sampleSource(sourceUV + vec2(towardDark.x, 0.0)),
+        sampleSource(sourceUV + vec2(0.0, towardDark.y)),
+        abs(direction.y) / max(abs(direction.x) + abs(direction.y), 0.0001)
+      );
+
+      vec3 gaussian = (center * 0.38774)
+        + (left + right + top + bottom) * 0.122385
+        + (tl + tr + bl + br) * 0.03068;
+      float flatArea = 1.0 - smoothstep(0.012, 0.20, edge);
+      float denoiseAmount = flatArea * clamp(denoise / 3.0, 0.0, 1.0) * mix(0.58, 0.88, profile);
+      vec3 denoised = mix(center, gaussian, denoiseAmount);
+
+      // Reconstruct along the least-contrast direction, then sharpen only real edges.
+      float horizontalContrast = length(left - right);
+      float verticalContrast = length(top - bottom);
+      vec3 edgeGuide = horizontalContrast < verticalContrast
+        ? (left + right) * 0.5
+        : (top + bottom) * 0.5;
+      vec3 diagonalGuide = (tl + tr + bl + br) * 0.25;
+      vec3 guided = mix(edgeGuide, directional, smoothstep(0.05, 0.42, edge));
+      guided = mix(guided, diagonalGuide, flatArea * 0.22);
+
+      float detailGain = mix(0.42, 1.15, profile) * strength;
+      vec3 highPass = denoised - gaussian;
+      vec3 sharpened = denoised + highPass * detailGain;
+      float refine = smoothstep(0.025, 0.42, edge) * clamp(strength * mix(0.42, 0.78, profile), 0.0, 1.0);
+      vec3 refined = mix(sharpened, guided + (sharpened - gaussian) * 0.55, refine);
+
+      float minL = min(lc, min(min(luma(left), luma(right)), min(luma(top), luma(bottom))));
+      float maxL = max(lc, max(max(luma(left), luma(right)), max(luma(top), luma(bottom))));
+      float rangePadding = mix(0.035, 0.085, profile) * clamp(strength, 0.0, 2.4);
+      float targetL = clamp(luma(refined), minL - rangePadding, maxL + rangePadding);
+      refined += vec3(targetL - luma(refined));
+      outColor = vec4(clamp(refined, 0.0, 1.0), 1.0);
+    }
+  `
+
+  function compile(type, source) {
+    const shader = gl.createShader(type)
+    gl.shaderSource(shader, source)
+    gl.compileShader(shader)
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || "Shader compile failed")
+    return shader
+  }
+
+  const program = gl.createProgram()
+  gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexSource))
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentSource))
+  gl.linkProgram(program)
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || "Shader link failed")
+
+  const sourceSize = gl.getUniformLocation(program, "sourceSize")
+  const strength = gl.getUniformLocation(program, "strength")
+  const profile = gl.getUniformLocation(program, "profile")
+  const denoise = gl.getUniformLocation(program, "denoise")
+  const sourceImage = gl.getUniformLocation(program, "sourceImage")
+  const texture = gl.createTexture()
+
+  function profileValue(name) {
+    if (name === "fast") return 0.0
+    if (name === "quality") return 1.0
+    return 0.55
+  }
+
+  async function run(dataURL, options = {}) {
+    const image = new Image()
+    image.src = dataURL
+    await image.decode()
+    const maxPixels = options.profile === "quality" ? 12500000 : options.profile === "fast" ? 7500000 : 9500000
+    const requestedScale = Math.max(1.0, Math.min(3.0, Number(options.scale ?? 2)))
+    let outWidth = Math.round(image.width * requestedScale)
+    let outHeight = Math.round(image.height * requestedScale)
+    const pixelCount = outWidth * outHeight
+    if (pixelCount > maxPixels) {
+      const scale = Math.sqrt(maxPixels / pixelCount)
+      outWidth = Math.max(image.width, Math.floor(outWidth * scale))
+      outHeight = Math.max(image.height, Math.floor(outHeight * scale))
+    }
+
+    canvas.width = outWidth
+    canvas.height = outHeight
+    gl.viewport(0, 0, outWidth, outHeight)
+    gl.useProgram(program)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image)
+    gl.uniform1i(sourceImage, 0)
+    gl.uniform2f(sourceSize, image.width, image.height)
+    gl.uniform1f(strength, Math.max(0.4, Math.min(2.4, Number(options.strength ?? 1.25))))
+    gl.uniform1f(profile, profileValue(options.profile))
+    gl.uniform1f(denoise, Math.max(0.0, Math.min(3.0, Number(options.denoise ?? 1))))
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+    gl.finish()
+    return canvas.toDataURL("image/png").split(",")[1]
+  }
+
+  function status() {
+    return {
+      backend: "webgl2",
+      maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+      maxRenderbufferSize: gl.getParameter(gl.MAX_RENDERBUFFER_SIZE),
+    }
+  }
+
+  window.Anime4KOffline = { ready: true, run, status }
+})()
+</script>
+</body>
+</html>

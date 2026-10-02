@@ -1,0 +1,26 @@
+# Node
+node_modules/
+*.local
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+
+# Scripting app
+package-lock.scripting.json
+
+# Large binary model files
+waifu2x_model.bin
+
+# Logs
+*.log

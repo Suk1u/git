@@ -1,0 +1,27 @@
+{
+  "contributors" : [
+
+  ],
+  "localizedDescriptions" : {
+    "en" : "Add manga sources with native iOS 26 Liquid Glass, built-in Pica and JMComic adapters, bounded reader prefetching, retries, protected image loading, and high-quality local upscaling.",
+    "zh" : "添加漫画网站图源，提供 iOS 26 原生 Liquid Glass 漫画体验，内建嗶咔漫画与 JMComic，阅读器支持章节预取、有限并发、失败重试、受保护图片加载和高质量本地超分。"
+  },
+  "runInApp" : false,
+  "remoteResource" : null,
+  "iconImage" : "",
+  "intentInputTypes" : [
+
+  ],
+  "permissions" : null,
+  "color" : "rgba(215, 38, 56, 1)",
+  "version" : "4.8.0",
+  "name" : "Liquid Manga Reader000",
+  "entry" : "index.tsx",
+  "icon" : "books.vertical.fill",
+  "author" : null,
+  "description" : "添加漫画网站图源，提供 iOS 26 原生 Liquid Glass 漫画体验，支持嗶咔漫画与 JMComic 内建图源、章节预取、失败重试、受保护图片加载和高质量本地超分。",
+  "localizedNames" : {
+    "zh" : "琉璃漫画",
+    "en" : "Liquid Manga Reader"
+  }
+}
