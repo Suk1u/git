@@ -20,16 +20,16 @@ export async function requestText(url: string, referer?: string, extraHeaders: R
     timeout: 25,
   })
   if (!response.ok) {
-    if (response.status === 403) {
+    if (response.status === 403 || response.status === 503) {
       const text = await response.text().catch(() => "")
-      if (/Just a moment|Attention Required|Enable JavaScript and cookies/i.test(text)) {
+      if (/Just a moment|Attention Required|Enable JavaScript and cookies|cf-turnstile|cf-browser-verification/i.test(text)) {
         throw new Error("站点触发了 Cloudflare 验证，请点击右上角账号/验证按钮打开内置浏览器完成验证。")
       }
     }
     throw new Error(`HTTP ${response.status}: ${url}`)
   }
   const text = await response.text()
-  if (/Just a moment|Enable JavaScript and cookies to continue/i.test(text)) {
+  if (/Just a moment|Enable JavaScript and cookies to continue|cf-turnstile/i.test(text)) {
     throw new Error("站点触发了 Cloudflare 验证，请点击右上角账号/验证按钮打开内置浏览器完成验证。")
   }
   return text

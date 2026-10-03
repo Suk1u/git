@@ -105,7 +105,9 @@ function getFilePath(key: string, engine: string, scale: number): string {
 
 // In-memory LRU cache to avoid touching disk for active reading session
 const memCache = new Map<string, any>()
-const MAX_MEM_ENTRIES = 28
+const MAX_MEM_ENTRIES = 32
+// Known disk keys set to prevent repeated synchronous disk stat syscalls
+const knownDiskKeys = new Set<string>()
 
 function touchMemCache(key: string, image: any) {
   memCache.delete(key)
@@ -119,9 +121,11 @@ function touchMemCache(key: string, image: any) {
 
 export function hasEnhancedImage(params: EnhancedCacheParams): boolean {
   const key = makeEnhancedCacheKey(params)
-  if (memCache.has(key)) return true
+  if (memCache.has(key) || knownDiskKeys.has(key)) return true
   const filePath = getFilePath(key, params.engine, params.scale)
-  return FileManager.existsSync(filePath)
+  const exists = FileManager.existsSync(filePath)
+  if (exists) knownDiskKeys.add(key)
+  return exists
 }
 
 export async function getEnhancedImage(params: EnhancedCacheParams): Promise<any | null> {
@@ -132,7 +136,8 @@ export async function getEnhancedImage(params: EnhancedCacheParams): Promise<any
     return inMem
   }
   const filePath = getFilePath(key, params.engine, params.scale)
-  if (!FileManager.existsSync(filePath)) return null
+  if (!knownDiskKeys.has(key) && !FileManager.existsSync(filePath)) return null
+  knownDiskKeys.add(key)
   try {
     const loaded = UIImage.fromFile(filePath)
     if (loaded) {
@@ -148,6 +153,7 @@ export async function getEnhancedImage(params: EnhancedCacheParams): Promise<any
 export async function saveEnhancedImage(params: EnhancedCacheParams, image: any): Promise<void> {
   const key = makeEnhancedCacheKey(params)
   touchMemCache(key, image)
+  knownDiskKeys.add(key)
   const filePath = getFilePath(key, params.engine, params.scale)
   try {
     const b64 = image.toJPEGBase64String?.(0.96) ?? image.toPNGBase64String?.()
@@ -164,19 +170,19 @@ export async function getEnhancedCacheStats(): Promise<{ count: number; totalByt
   try {
     const dir = getCacheDir()
     const files = await FileManager.readDirectory(dir)
+    const imageFiles = files.filter(f => f.endsWith(".jpg") || f.endsWith(".png"))
+    const count = imageFiles.length
+    if (count === 0) return { count: 0, totalBytes: 0, totalMB: "0.0" }
+    
+    // Batch stat requests in parallel chunks of 16
     let totalBytes = 0
-    let count = 0
-    for (const file of files) {
-      if (file.endsWith(".jpg") || file.endsWith(".png")) {
-        count++
-        try {
-          const fullPath = Path.join(dir, file)
-          const s = await FileManager.stat(fullPath)
-          totalBytes += s.size ?? 0
-        } catch {
-          // Ignore individual stat errors
-        }
-      }
+    const CHUNK_SIZE = 16
+    for (let i = 0; i < imageFiles.length; i += CHUNK_SIZE) {
+      const chunk = imageFiles.slice(i, i + CHUNK_SIZE)
+      const stats = await Promise.all(
+        chunk.map(file => FileManager.stat(Path.join(dir, file)).catch(() => ({ size: 0 }))),
+      )
+      for (const s of stats) totalBytes += s.size ?? 0
     }
     const totalMB = (totalBytes / (1024 * 1024)).toFixed(1)
     return { count, totalBytes, totalMB }
@@ -187,20 +193,13 @@ export async function getEnhancedCacheStats(): Promise<{ count: number; totalByt
 
 export async function clearEnhancedCache(): Promise<number> {
   memCache.clear()
+  knownDiskKeys.clear()
   try {
     const dir = getCacheDir()
     const files = await FileManager.readDirectory(dir)
-    let count = 0
-    for (const file of files) {
-      try {
-        const fullPath = Path.join(dir, file)
-        await FileManager.remove(fullPath)
-        count++
-      } catch {
-        // Ignore single remove error
-      }
-    }
-    return count
+    const removePromises = files.map(file => FileManager.remove(Path.join(dir, file)).catch(() => undefined))
+    await Promise.all(removePromises)
+    return files.length
   } catch {
     return 0
   }

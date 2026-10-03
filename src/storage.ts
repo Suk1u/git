@@ -208,42 +208,53 @@ export function chapterKey(manga: Pick<MangaSummary, "sourceId" | "id">, chapter
   return `${mangaKey(manga)}:${chapterId}`
 }
 
+let memDetailCache: DetailCacheEntry[] | null = null
+let memPageCache: PageCacheEntry[] | null = null
+
 export function loadCachedDetail(manga: MangaSummary): MangaDetail | null {
   const key = mangaKey(manga)
   const now = Date.now()
-  const entries = readValue<DetailCacheEntry[]>(DETAIL_CACHE_KEY, [])
-  return entries.find(entry => entry.key === key && now - entry.cachedAt < DETAIL_CACHE_TTL)?.detail ?? null
+  if (!memDetailCache) memDetailCache = readValue<DetailCacheEntry[]>(DETAIL_CACHE_KEY, [])
+  const entry = memDetailCache.find(e => e.key === key)
+  if (entry && now - entry.cachedAt < DETAIL_CACHE_TTL) return entry.detail
+  return null
 }
 
 export function saveCachedDetail(detail: MangaDetail) {
   const key = mangaKey(detail)
   const entry: DetailCacheEntry = { key, cachedAt: Date.now(), detail }
-  const next = [entry, ...readValue<DetailCacheEntry[]>(DETAIL_CACHE_KEY, []).filter(item => item.key !== key)]
-  while (next.length > 2 || (next.length > 1 && JSON.stringify(next).length > 1_200_000)) next.pop()
+  if (!memDetailCache) memDetailCache = readValue<DetailCacheEntry[]>(DETAIL_CACHE_KEY, [])
+  const next = [entry, ...memDetailCache.filter(item => item.key !== key)].slice(0, 30)
+  memDetailCache = next
   writeStored(DETAIL_CACHE_KEY, next)
 }
 
 export function loadCachedPages(manga: MangaSummary, chapterId: string): string[] | null {
   const key = chapterKey(manga, chapterId)
   const now = Date.now()
-  const entries = readValue<PageCacheEntry[]>(PAGE_CACHE_KEY, [])
-  return entries.find(entry => entry.key === key && now - entry.cachedAt < PAGE_CACHE_TTL)?.urls ?? null
+  if (!memPageCache) memPageCache = readValue<PageCacheEntry[]>(PAGE_CACHE_KEY, [])
+  const entry = memPageCache.find(e => e.key === key)
+  if (entry && now - entry.cachedAt < PAGE_CACHE_TTL) return entry.urls
+  return null
 }
 
 export function saveCachedPages(manga: MangaSummary, chapterId: string, urls: string[]) {
   const key = chapterKey(manga, chapterId)
   const entry: PageCacheEntry = { key, cachedAt: Date.now(), urls }
-  const next = [entry, ...readValue<PageCacheEntry[]>(PAGE_CACHE_KEY, []).filter(item => item.key !== key)].slice(0, 20)
-  while (next.length > 1 && JSON.stringify(next).length > 300_000) next.pop()
+  if (!memPageCache) memPageCache = readValue<PageCacheEntry[]>(PAGE_CACHE_KEY, [])
+  const next = [entry, ...memPageCache.filter(item => item.key !== key)].slice(0, 40)
+  memPageCache = next
   writeStored(PAGE_CACHE_KEY, next)
 }
 
 export function clearCachedSourceData(sourceId: string) {
   const prefix = `${sourceId}:`
-  const details = readValue<DetailCacheEntry[]>(DETAIL_CACHE_KEY, []).filter(entry => !entry.key.startsWith(prefix))
-  const pages = readValue<PageCacheEntry[]>(PAGE_CACHE_KEY, []).filter(entry => !entry.key.startsWith(prefix))
-  writeStored(DETAIL_CACHE_KEY, details)
-  writeStored(PAGE_CACHE_KEY, pages)
+  if (!memDetailCache) memDetailCache = readValue<DetailCacheEntry[]>(DETAIL_CACHE_KEY, [])
+  if (!memPageCache) memPageCache = readValue<PageCacheEntry[]>(PAGE_CACHE_KEY, [])
+  memDetailCache = memDetailCache.filter(entry => !entry.key.startsWith(prefix))
+  memPageCache = memPageCache.filter(entry => !entry.key.startsWith(prefix))
+  writeStored(DETAIL_CACHE_KEY, memDetailCache)
+  writeStored(PAGE_CACHE_KEY, memPageCache)
 }
 
 export function loadFavorites(): MangaSummary[] {

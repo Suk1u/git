@@ -95,6 +95,27 @@ function ReaderImage({ value, fullscreen = false }: { value: ReaderImageValue | 
   )
 }
 
+function WebtoonPageItem({
+  itemKey,
+  image,
+  onTap,
+}: {
+  itemKey: string
+  image: any
+  onTap: () => void
+}) {
+  return (
+    <VStack
+      key={itemKey}
+      frame={{ maxWidth: "infinity" }}
+      contentShape="rect"
+      onTapGesture={onTap}
+    >
+      <ReaderImage value={image ?? null} />
+    </VStack>
+  )
+}
+
 const READER_BUTTON_SIZE = 50
 const READER_BUTTON_RADIUS = READER_BUTTON_SIZE / 2
 const READER_ICON_SIZE = 29
@@ -219,17 +240,6 @@ export function ReaderPage({
     Transition.opacity().animation(Animation.easeOut(0.36)),
   )
 
-  const webtoonPageViews = useMemo(() => flatPages.map(item => (
-    <VStack
-      key={item.key}
-      frame={{ maxWidth: "infinity" }}
-      contentShape="rect"
-      onTapGesture={toggleControls}
-    >
-      <ReaderImage value={loadedImages[item.key] ?? null} />
-    </VStack>
-  )), [flatPages, loadedImages])
-
   const currentSegment = segments.find(segment => segment.chapter.id === chapter.id)
   const urls = currentSegment?.urls ?? []
   const chapterIndex = manga.chapters.findIndex(item => item.id === chapter.id)
@@ -290,8 +300,9 @@ export function ReaderPage({
   }, [readerSettings.upscalerEnabled, readerSettings.upscalerEngine, readerSettings.upscalerScope, readerSettings.waifu2xDenoise, readerSettings.waifu2xScale, currentSegment?.urls.length])
 
   useEffect(() => {
-    // 内存安全控制：当前章节所有图片均在内存中常驻，绝对不卸载，杜绝滑动时的视图销毁与重新布局闪烁！
-    // 只有非当前章节（比如上一话或下一话）远离视口超过 6 页时才安全卸载
+    // 内存安全控制：只有多章节拼接且远离视口超过 6 页时才安全卸载，避免单章节阅读时频繁执行状态比较
+    if (segments.length <= 1) return
+
     const visibleIndex = flatPages.findIndex(item => item.key === processingAnchor)
     const center = visibleIndex >= 0 ? visibleIndex : 0
     const activeKeys = new Set<string>()
@@ -315,7 +326,7 @@ export function ReaderPage({
       }
       return changed ? next : current
     })
-  }, [processingAnchor, chapter.id])
+  }, [processingAnchor, chapter.id, segments.length])
 
   useEffect(() => {
     const generation = readerState.generation
@@ -324,7 +335,22 @@ export function ReaderPage({
 
     const upscalerEnabled = readerSettings.upscalerEnabled ?? !!(readerSettings.anime4kEnabled)
 
-    function refreshProgress() {
+    let progressTimer: any = null
+    function scheduleRefreshProgress(immediate = false) {
+      if (immediate) {
+        if (progressTimer) clearTimeout(progressTimer)
+        progressTimer = null
+        doRefreshProgress()
+        return
+      }
+      if (progressTimer) return
+      progressTimer = setTimeout(() => {
+        progressTimer = null
+        doRefreshProgress()
+      }, 240)
+    }
+
+    function doRefreshProgress() {
       const currentPages = flatPages.filter(p => p.chapter.id === chapter.id)
       const total = currentPages.length
       if (!total) return
@@ -336,16 +362,21 @@ export function ReaderPage({
 
       let completed = 0
       for (const p of currentPages) {
-        const cacheParams = makeEnhancedCacheParamsFromSettings(
-          readerSettings,
-          source.id,
-          manga.id,
-          chapter.id,
-          p.url,
-        )
         const k = `${version}:${p.key}`
-        if (hasEnhancedImage(cacheParams) || readerState.processedKeys.has(k) || Boolean(loadedImages[p.key])) {
+        if (readerState.processedKeys.has(k) || Boolean(loadedImages[p.key])) {
           completed++
+        } else {
+          const cacheParams = makeEnhancedCacheParamsFromSettings(
+            readerSettings,
+            source.id,
+            manga.id,
+            chapter.id,
+            p.url,
+          )
+          if (hasEnhancedImage(cacheParams)) {
+            readerState.processedKeys.add(k)
+            completed++
+          }
         }
       }
       setChapterProgress({ completed, total })
@@ -462,8 +493,8 @@ export function ReaderPage({
             if (cached) {
               readerState.downloadedKeys.add(item.key)
               if (generation === readerState.generation) {
-                setLoadedImages(current => ({ ...current, [item.key]: cached }))
-                refreshProgress()
+                setLoadedImages(current => current[item.key] === cached ? current : ({ ...current, [item.key]: cached }))
+                scheduleRefreshProgress()
               }
               continue
             }
@@ -472,7 +503,7 @@ export function ReaderPage({
           const original = await loadWithRetry(item)
           readerState.downloadedKeys.add(item.key)
           if (generation === readerState.generation) {
-            setLoadedImages(current => ({ ...current, [item.key]: current[item.key] ?? original }))
+            setLoadedImages(current => current[item.key] ? current : ({ ...current, [item.key]: original }))
           }
         } catch {
           // ignore
@@ -513,15 +544,14 @@ export function ReaderPage({
           if (cachedEnhanced != null) {
             if (generation !== readerState.generation || version !== readerState.processingVersion) return
             readerState.processedKeys.add(workKey)
-            setLoadedImages(current => ({ ...current, [item.key]: cachedEnhanced }))
-            refreshProgress()
+            setLoadedImages(current => current[item.key] === cachedEnhanced ? current : ({ ...current, [item.key]: cachedEnhanced }))
+            scheduleRefreshProgress()
             continue
           }
 
           // 2. 获取原图（已被 preloadWorker 秒级预载好）
           const original = await loadWithRetry(item)
           if (generation !== readerState.generation || version !== readerState.processingVersion) return
-          setLoadedImages(current => ({ ...current, [item.key]: current[item.key] ?? original }))
 
           // 3. 执行超分推理
           const enhanced = readerSettings.upscalerEngine === "waifu2x"
@@ -543,16 +573,16 @@ export function ReaderPage({
           if (enhanced) {
             await saveEnhancedImage(cacheParams, enhanced)
             readerState.processedKeys.add(workKey)
-            setLoadedImages(current => ({ ...current, [item.key]: enhanced }))
-            refreshProgress()
+            setLoadedImages(current => current[item.key] === enhanced ? current : ({ ...current, [item.key]: enhanced }))
+            scheduleRefreshProgress()
           } else {
             readerState.processedKeys.add(workKey)
-            refreshProgress()
+            scheduleRefreshProgress()
           }
         } catch (reason) {
           console.error("超分推理异常:", reason)
           readerState.processedKeys.add(workKey)
-          refreshProgress()
+          scheduleRefreshProgress()
         } finally {
           readerState.processingKeys.delete(workKey)
         }
@@ -561,8 +591,11 @@ export function ReaderPage({
 
     Promise.all(Array.from({ length: 3 }, preloadWorker)).catch(console.error)
     upscalerWorker().catch(console.error)
-    refreshProgress()
-    return () => { cancelled = true }
+    scheduleRefreshProgress(true)
+    return () => {
+      cancelled = true
+      if (progressTimer) clearTimeout(progressTimer)
+    }
   }, [
     flatPages.length,
     chapter.id,
@@ -895,7 +928,14 @@ export function ReaderPage({
             }}
           >
             <LazyVStack spacing={0} alignment="center" frame={{ maxWidth: "infinity" }} scrollTargetLayout={true}>
-              {webtoonPageViews}
+              {flatPages.map(item => (
+                <WebtoonPageItem
+                  key={item.key}
+                  itemKey={item.key}
+                  image={loadedImages[item.key]}
+                  onTap={toggleControls}
+                />
+              ))}
             </LazyVStack>
           </ScrollView>
         )
